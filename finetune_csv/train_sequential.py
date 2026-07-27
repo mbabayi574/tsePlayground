@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 
-sys.path.append('../')
+sys.path.append('/home/bobby/Documents/tsePlayground')
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 from config_loader import CustomFinetuneConfig
@@ -29,7 +29,7 @@ class SequentialTrainer:
     def _setup_device(self):
         try:
             import intel_extension_for_pytorch as ipex
-        except ImportError:
+        except Exception:
             pass
 
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
