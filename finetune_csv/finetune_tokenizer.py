@@ -169,8 +169,7 @@ def train_tokenizer(model, device, config, save_dir, logger):
         mode='min',
         factor=0.5,
         patience=5,
-        min_lr=1e-7,
-        verbose=True if rank == 0 else False
+        min_lr=1e-7
     )
     
     early_stopping_patience = getattr(config, 'early_stopping_patience', 15)
