@@ -42,59 +42,77 @@ class CustomKlineDataset(Dataset):
         
         self.py_rng = random.Random(seed)
         
+        self.datasets = []
+        self.sample_indices = []
+        
         self._load_and_preprocess_data()
         self._split_data_by_time()
         
-        self.n_samples = len(self.data) - self.window + 1
+        self.n_samples = len(self.sample_indices)
             
-        print(f"[{data_type.upper()}] Data length: {len(self.data)}, Available samples: {self.n_samples}")
+        print(f"[{data_type.upper()}] Available samples: {self.n_samples}")
     
     def _load_and_preprocess_data(self):
-        df = pd.read_csv(self.data_path)
+        import glob
+        if os.path.isdir(self.data_path):
+            files = sorted(glob.glob(os.path.join(self.data_path, "*.csv")))
+        else:
+            files = [self.data_path]
+            
+        self.raw_dfs = []
+        self.raw_timestamps = []
         
-        df['timestamps'] = pd.to_datetime(df['timestamps'])
-        df = df.sort_values('timestamps').reset_index(drop=True)
-        
-        self.timestamps = df['timestamps'].copy()
-        
-        df['minute'] = df['timestamps'].dt.minute
-        df['hour'] = df['timestamps'].dt.hour
-        df['weekday'] = df['timestamps'].dt.weekday
-        df['day'] = df['timestamps'].dt.day
-        df['month'] = df['timestamps'].dt.month
-        
-        self.data = df[self.feature_list + self.time_feature_list].copy()
-        
-        if self.data.isnull().any().any():
-            print("Warning: Missing values found in data, performing forward fill")
-            self.data = self.data.fillna(method='ffill')
-        
-        print(f"Original data time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        print(f"Original data total length: {len(df)} records")
+        for file_path in files:
+            print(f"Loading {file_path}...")
+            df = pd.read_csv(file_path)
+            
+            df['timestamps'] = pd.to_datetime(df['timestamps'])
+            df = df.sort_values('timestamps').reset_index(drop=True)
+            
+            timestamps = df['timestamps'].copy()
+            
+            df['minute'] = df['timestamps'].dt.minute
+            df['hour'] = df['timestamps'].dt.hour
+            df['weekday'] = df['timestamps'].dt.weekday
+            df['day'] = df['timestamps'].dt.day
+            df['month'] = df['timestamps'].dt.month
+            
+            data_df = df[self.feature_list + self.time_feature_list].copy()
+            
+            if data_df.isnull().any().any():
+                print(f"Warning: Missing values found in {file_path}, performing forward fill")
+                data_df = data_df.fillna(method='ffill')
+            
+            self.raw_dfs.append(data_df)
+            self.raw_timestamps.append(timestamps)
     
     def _split_data_by_time(self):
-        total_length = len(self.data)
+        self.datasets = []
+        self.sample_indices = []
         
-        train_end = int(total_length * self.train_ratio)
-        val_end = int(total_length * (self.train_ratio + self.val_ratio))
-        
-        if self.data_type == 'train':
-            self.data = self.data.iloc[:train_end].copy()
-            self.timestamps = self.timestamps.iloc[:train_end].copy()
-            print(f"[{self.data_type.upper()}] Training set: first {train_end} time points ({self.train_ratio})")
-            print(f"[{self.data_type.upper()}] Training set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        elif self.data_type == 'val':
-            self.data = self.data.iloc[train_end:val_end].copy()
-            self.timestamps = self.timestamps.iloc[train_end:val_end].copy()
-            print(f"[{self.data_type.upper()}] Validation set: time points {train_end+1} to {val_end} ({self.val_ratio})")
-            print(f"[{self.data_type.upper()}] Validation set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        elif self.data_type == 'test':
-            self.data = self.data.iloc[val_end:].copy()
-            self.timestamps = self.timestamps.iloc[val_end:].copy()
-            print(f"[{self.data_type.upper()}] Test set: after time point {val_end+1}")
-            print(f"[{self.data_type.upper()}] Test set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        
-        print(f"[{self.data_type.upper()}] Data length after split: {len(self.data)} records")
+        for df_idx, (data_df, timestamps) in enumerate(zip(self.raw_dfs, self.raw_timestamps)):
+            total_length = len(data_df)
+            
+            train_end = int(total_length * self.train_ratio)
+            val_end = int(total_length * (self.train_ratio + self.val_ratio))
+            
+            if self.data_type == 'train':
+                split_df = data_df.iloc[:train_end].copy()
+            elif self.data_type == 'val':
+                split_df = data_df.iloc[train_end:val_end].copy()
+            elif self.data_type == 'test':
+                split_df = data_df.iloc[val_end:].copy()
+            
+            split_len = len(split_df)
+            max_start = split_len - self.window
+            
+            if max_start > 0:
+                self.datasets.append(split_df)
+                current_ds_idx = len(self.datasets) - 1
+                for start_idx in range(max_start + 1):
+                    self.sample_indices.append((current_ds_idx, start_idx))
+                    
+        print(f"[{self.data_type.upper()}] Loaded {len(self.datasets)} valid segments.")
     
     def set_epoch_seed(self, epoch):
         epoch_seed = self.seed + epoch
@@ -105,19 +123,19 @@ class CustomKlineDataset(Dataset):
         return self.n_samples
     
     def __getitem__(self, idx):
-        max_start = len(self.data) - self.window
-        if max_start <= 0:
+        if self.n_samples <= 0:
             raise ValueError("Data length insufficient to create samples")
         
         if self.data_type == 'train':
             epoch = getattr(self, 'current_epoch', 0)
-            start_idx = (idx * 9973 + (epoch + 1) * 104729) % (max_start + 1)
+            idx = (idx * 9973 + (epoch + 1) * 104729) % self.n_samples
         else:
-            start_idx = idx % (max_start + 1)
-        
+            idx = idx % self.n_samples
+            
+        ds_idx, start_idx = self.sample_indices[idx]
         end_idx = start_idx + self.window
         
-        window_data = self.data.iloc[start_idx:end_idx]
+        window_data = self.datasets[ds_idx].iloc[start_idx:end_idx]
         
         x = window_data[self.feature_list].values.astype(np.float32)
         x_stamp = window_data[self.time_feature_list].values.astype(np.float32)
@@ -372,7 +390,17 @@ def main():
                        help='Configuration file path (default: config.yaml)')
     args = parser.parse_args()
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        import intel_extension_for_pytorch as ipex
+    except ImportError:
+        pass
+
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        device = torch.device("xpu")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     print(f"Using device: {device}")
     
     config = CustomFinetuneConfig(args.config)
@@ -383,6 +411,10 @@ def main():
     logger = setup_logging(config.exp_name, log_dir, 0)
     
     torch.manual_seed(config.seed)
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        torch.xpu.manual_seed_all(config.seed)
+    elif torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
     np.random.seed(config.seed)
     random.seed(config.seed)
     

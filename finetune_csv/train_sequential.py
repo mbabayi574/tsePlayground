@@ -27,7 +27,15 @@ class SequentialTrainer:
         self.config.print_config_summary()
     
     def _setup_device(self):
-        if self.config.use_cuda and torch.cuda.is_available():
+        try:
+            import intel_extension_for_pytorch as ipex
+        except ImportError:
+            pass
+
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            torch.xpu.set_device(self.local_rank)
+            device = torch.device(f"xpu:{self.local_rank}")
+        elif self.config.use_cuda and torch.cuda.is_available():
             torch.cuda.set_device(self.local_rank)
             device = torch.device(f"cuda:{self.local_rank}")
         else:
@@ -38,8 +46,9 @@ class SequentialTrainer:
         return device
     
     def _setup_distributed(self):
-        if self.world_size > 1 and torch.cuda.is_available():
-            backend = os.environ.get("DIST_BACKEND", "nccl").lower()
+        if self.world_size > 1 and (torch.cuda.is_available() or (hasattr(torch, 'xpu') and torch.xpu.is_available())):
+            default_backend = "ccl" if hasattr(torch, 'xpu') and torch.xpu.is_available() else "nccl"
+            backend = os.environ.get("DIST_BACKEND", default_backend).lower()
             if not dist.is_initialized():
                 dist.init_process_group(backend=backend)
             if self.rank == 0:
