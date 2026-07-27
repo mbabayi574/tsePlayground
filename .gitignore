@@ -30,9 +30,6 @@ MANIFEST
 # VS Code
 .vscode/
 
-# Datasets
-data/
-
 # macOS
 .DS_Store
 .AppleDouble
