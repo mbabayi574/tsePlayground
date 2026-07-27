@@ -29,7 +29,7 @@ def set_seed(seed: int, rank: int = 0):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(actual_seed)
         torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.benchmark = True
     elif hasattr(torch, 'xpu') and torch.xpu.is_available():
         torch.xpu.manual_seed_all(actual_seed)
 
@@ -173,6 +173,8 @@ def train_tokenizer(model, device, config, save_dir, logger):
         div_factor=10
     )
     
+    scaler = torch.cuda.amp.GradScaler()
+    
     if use_ddp:
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
@@ -200,22 +202,25 @@ def train_tokenizer(model, device, config, save_dir, logger):
                 end_idx = (j + 1) * (ori_batch_x.shape[0] // accumulation_steps)
                 batch_x = ori_batch_x[start_idx:end_idx]
                 
-                zs, bsq_loss, _, _ = (model.module if use_ddp else model)(batch_x)
-                z_pre, z = zs
-                
-                recon_loss_pre = F.mse_loss(z_pre, batch_x)
-                recon_loss_all = F.mse_loss(z, batch_x)
-                recon_loss = recon_loss_pre + recon_loss_all
-                loss = (recon_loss + bsq_loss) / 2
-                
-                loss_scaled = loss / accumulation_steps
+                with torch.cuda.amp.autocast():
+                    zs, bsq_loss, _, _ = (model.module if use_ddp else model)(batch_x)
+                    z_pre, z = zs
+                    
+                    recon_loss_pre = F.mse_loss(z_pre, batch_x)
+                    recon_loss_all = F.mse_loss(z, batch_x)
+                    recon_loss = recon_loss_pre + recon_loss_all
+                    loss = (recon_loss + bsq_loss) / 2
+                    
+                    loss_scaled = loss / accumulation_steps
                 current_batch_total_loss += loss.item()
-                loss_scaled.backward()
+                scaler.scale(loss_scaled).backward()
             
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_((model.module if use_ddp else model).parameters(), max_norm=2.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             if (batch_idx_global + 1) % config.log_interval == 0:
                 avg_loss = current_batch_total_loss / accumulation_steps
@@ -276,6 +281,8 @@ def train_tokenizer(model, device, config, save_dir, logger):
                 save_msg = f"Best model saved to: {model_save_path} (validation loss: {best_val_loss:.4f})"
                 logger.info(save_msg)
                 print(save_msg)
+                
+        torch.cuda.empty_cache()
     
     return best_val_loss
 

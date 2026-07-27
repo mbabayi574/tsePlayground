@@ -268,14 +268,19 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
         weight_decay=config.adam_weight_decay
     )
     
+    accumulation_steps = getattr(config, 'accumulation_steps', 1)
+    steps_per_epoch = (len(train_loader) + accumulation_steps - 1) // accumulation_steps
+    
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=config.predictor_learning_rate,
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=steps_per_epoch,
         epochs=config.basemodel_epochs,
         pct_start=0.03,
         div_factor=10
     )
+    
+    scaler = torch.cuda.amp.GradScaler()
     
     if use_ddp:
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -301,19 +306,26 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
             batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
             
             with torch.no_grad():
-                token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
+                with torch.cuda.amp.autocast():
+                    token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
             
             token_in = [token_seq_0[:, :-1], token_seq_1[:, :-1]]
             token_out = [token_seq_0[:, 1:], token_seq_1[:, 1:]]
             
-            logits = (model.module if use_ddp else model)(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-            loss, s1_loss, s2_loss = (model.module if use_ddp else model).head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+            with torch.cuda.amp.autocast():
+                logits = (model.module if use_ddp else model)(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
+                loss, s1_loss, s2_loss = (model.module if use_ddp else model).head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+                loss_scaled = loss / accumulation_steps
             
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_((model.module if use_ddp else model).parameters(), max_norm=3.0)
-            optimizer.step()
-            scheduler.step()
+            scaler.scale(loss_scaled).backward()
+            
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_((model.module if use_ddp else model).parameters(), max_norm=3.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
             
             epoch_train_loss += loss.item()
             train_batches += 1
@@ -337,12 +349,13 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
                 batch_x = batch_x.to(device, non_blocking=True)
                 batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
                 
-                token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
-                token_in = [token_seq_0[:, :-1], token_seq_1[:, :-1]]
-                token_out = [token_seq_0[:, 1:], token_seq_1[:, 1:]]
-                
-                logits = (model.module if use_ddp else model)(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
-                loss, _, _ = (model.module if use_ddp else model).head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
+                with torch.cuda.amp.autocast():
+                    token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
+                    token_in = [token_seq_0[:, :-1], token_seq_1[:, :-1]]
+                    token_out = [token_seq_0[:, 1:], token_seq_1[:, 1:]]
+                    
+                    logits = (model.module if use_ddp else model)(token_in[0], token_in[1], batch_x_stamp[:, :-1, :])
+                    loss, _, _ = (model.module if use_ddp else model).head.compute_loss(logits[0], logits[1], token_out[0], token_out[1])
                 
                 val_loss += loss.item()
                 val_batches += 1
@@ -378,6 +391,8 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
                 save_msg = f"Best model saved to: {model_save_path} (validation loss: {best_val_loss:.4f})"
                 logger.info(save_msg)
                 print(save_msg)
+                
+        torch.cuda.empty_cache()
     
     return best_val_loss
 
