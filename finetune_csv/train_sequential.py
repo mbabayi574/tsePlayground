@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 
-sys.path.append('/home/bobby/Documents/tsePlayground')
+sys.path.append('/content')
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 from config_loader import CustomFinetuneConfig
