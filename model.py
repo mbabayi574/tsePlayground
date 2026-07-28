@@ -28,8 +28,8 @@ def load_all_data():
     return pd.concat(dfs, ignore_index=True)
 
 def train_models(df):
-    X = df[FEATURES]
-    y = df["signal"]
+    X = df[FEATURES].astype(float)
+    y = df["signal"].astype(int)
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False
