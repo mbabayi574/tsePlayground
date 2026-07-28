@@ -1,4 +1,5 @@
 SYMBOLS = {
+    "Atlas": "اطلس",
     "Foolad": "فولاد",
     "Khodro": "خودرو",
     "Shasta": "شستا",
