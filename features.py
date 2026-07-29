@@ -153,12 +153,38 @@ def add_features(df):
 
 def create_target(df, days=5, threshold=0.05):
     """
-    Binary target: 1 if forward return over `days` exceeds `threshold`.
+    Build prediction targets from forward returns.
+
+    Binary target (``signal``):
+        1 if forward return over *days* exceeds *threshold*.
+
+    Multi-class target (``signal_class``):
+        0 = Strong Sell  (bottom 20 % of forward returns)
+        1 = Sell          (20 – 40 %)
+        2 = Neutral       (40 – 60 %)
+        3 = Buy           (60 – 80 %)
+        4 = Strong Buy    (top 20 %)
+
     Uses adjClose when available for split/dividend-adjusted returns.
     """
     price_col = "adjClose" if "adjClose" in df.columns else "close"
     df["future_return"] = df[price_col].shift(-days) / df[price_col] - 1
+
+    # ── Binary target (backward compatible) ─────────────────────────────
     df["signal"] = (df["future_return"] > threshold).astype(int)
+
+    # ── Multi-class target (5 classes via quintile ranks) ───────────────
+    df["signal_class"] = pd.cut(
+        df["future_return"],
+        bins=[-np.inf,
+              df["future_return"].quantile(0.20),
+              df["future_return"].quantile(0.40),
+              df["future_return"].quantile(0.60),
+              df["future_return"].quantile(0.80),
+              np.inf],
+        labels=[0, 1, 2, 3, 4],
+        duplicates="drop",
+    ).astype(float)
     return df
 
 

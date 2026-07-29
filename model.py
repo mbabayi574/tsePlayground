@@ -1,13 +1,20 @@
 """
-Enhanced classifier for TSE buy-signal prediction.
+Multi-class classifier for TSE stock signal prediction.
 
-Key improvements over the baseline:
+Predicts a 5-class ordinal signal:
+  0 = Strong Sell  (bottom 20 % of 5-day forward returns)
+  1 = Sell          (20 – 40 %)
+  2 = Neutral       (40 – 60 %)
+  3 = Buy           (60 – 80 %)
+  4 = Strong Buy    (top 20 %)
+
+Key features:
   1. Purged time-aware split per symbol (gap to prevent target leakage).
   2. Automated feature-list discovery from processed CSVs.
   3. Robust pre-processing (inf/NaN handling, winsorisation).
   4. Hyperparameter-tuned XGBoost + LightGBM with early stopping.
   5. Exponential sample weighting (recency bias).
-  6. Precision-recall-aware threshold tuning.
+  6. Macro-averaged precision / recall / F1 and per-class reports.
   7. Purged walk-forward cross-validation.
   8. Feature importance and per-symbol analysis.
 """
@@ -22,9 +29,8 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     f1_score,
-    roc_auc_score,
-    precision_recall_curve,
-    average_precision_score,
+    accuracy_score,
+    confusion_matrix,
 )
 from xgboost import XGBClassifier
 
@@ -40,11 +46,15 @@ from symbols import SYMBOL_NAMES
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# ── Signal class labels ────────────────────────────────────────────────
+SIGNAL_LABELS = {0: "Strong Sell", 1: "Sell", 2: "Neutral", 3: "Buy", 4: "Strong Buy"}
+NUM_CLASSES = len(SIGNAL_LABELS)
+
 # ── Columns that must NOT be used as features ──────────────────────────
 NON_FEATURE_COLS = {
     "date", "timestamp", "open", "high", "low", "close",
     "adjClose", "value", "volume", "count", "yesterday",
-    "future_return", "signal", "symbol",
+    "future_return", "signal", "signal_class", "symbol",
 }
 
 
@@ -98,7 +108,7 @@ def purged_time_split(df, test_ratio=0.20, purge_days=10):
 
 # ── Pre-processing ─────────────────────────────────────────────────────
 
-def clean_Xy(df, features):
+def clean_Xy(df, features, target_col="signal_class"):
     """Replace inf, winsorise extreme outliers, fill NaN."""
     X = df[features].copy()
     X.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -107,7 +117,7 @@ def clean_Xy(df, features):
         if lo != hi:
             X[col] = X[col].clip(lo, hi)
     X.fillna(0, inplace=True)
-    y = df["signal"].astype(int)
+    y = df[target_col].astype(int)
     return X, y
 
 
@@ -128,30 +138,6 @@ def compute_sample_weights(df, half_life_days=500):
         decay = np.exp(-np.log(2) * (n - 1 - positions) / half_life_days)
         weights[idx] = decay
     return weights
-
-
-# ── Threshold Tuning ───────────────────────────────────────────────────
-
-def find_best_threshold(y_true, y_proba, min_precision=0.35):
-    """
-    Walk the precision-recall curve and pick the threshold that
-    maximises F1 while keeping precision ≥ min_precision.
-    Falls back to best-F1 threshold if nothing satisfies the constraint.
-    """
-    precisions, recalls, thresholds = precision_recall_curve(y_true, y_proba)
-    f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-9)
-
-    # Constrained search
-    mask = precisions[:-1] >= min_precision
-    if mask.any():
-        constrained_f1 = f1_scores[:-1].copy()
-        constrained_f1[~mask] = -1
-        best_idx = np.argmax(constrained_f1)
-        return thresholds[best_idx]
-
-    # Fallback: best F1 overall
-    best_idx = np.argmax(f1_scores[:-1])
-    return thresholds[best_idx]
 
 
 # ── Walk-Forward Cross-Validation ──────────────────────────────────────
@@ -191,45 +177,38 @@ def walk_forward_cv(df, features, n_splits=4, purge_days=10):
         if y_te.nunique() < 2 or len(X_tr) < 100:
             continue
 
-        cr = max((y_tr == 0).sum() / max((y_tr == 1).sum(), 1), 1.0)
         sw = compute_sample_weights(train)
 
         model = XGBClassifier(
             n_estimators=500, max_depth=5, learning_rate=0.03,
             subsample=0.8, colsample_bytree=0.6, min_child_weight=10,
             gamma=2, reg_alpha=0.5, reg_lambda=2.0,
-            scale_pos_weight=cr, eval_metric="aucpr",
+            objective="multi:softprob", num_class=NUM_CLASSES,
+            eval_metric="mlogloss",
             random_state=42, verbosity=0, tree_method="hist",
         )
         model.fit(X_tr, y_tr, sample_weight=sw,
                   eval_set=[(X_te, y_te)], verbose=False)
-        proba = model.predict_proba(X_te)[:, 1]
+        preds = model.predict(X_te)
 
-        thr = find_best_threshold(y_te, proba, min_precision=0.35)
-        preds = (proba >= thr).astype(int)
-
-        p = precision_score(y_te, preds, zero_division=0)
-        r = recall_score(y_te, preds, zero_division=0)
-        f = f1_score(y_te, preds, zero_division=0)
-        a = roc_auc_score(y_te, proba)
-        ap = average_precision_score(y_te, proba)
+        acc = accuracy_score(y_te, preds)
+        p = precision_score(y_te, preds, average="macro", zero_division=0)
+        r = recall_score(y_te, preds, average="macro", zero_division=0)
+        f = f1_score(y_te, preds, average="macro", zero_division=0)
 
         results.append({
-            "fold": fold, "precision": p, "recall": r,
-            "f1": f, "roc_auc": a, "pr_auc": ap, "threshold": thr,
-            "train_size": len(X_tr), "test_size": len(X_te),
+            "fold": fold, "accuracy": acc, "precision": p, "recall": r,
+            "f1": f, "train_size": len(X_tr), "test_size": len(X_te),
         })
-        print(f"  Fold {fold}: Prec={p:.3f}  Rec={r:.3f}  F1={f:.3f}  "
-              f"AUC={a:.3f}  PR-AUC={ap:.3f}  thr={thr:.3f}  "
-              f"(train={len(X_tr):,}  test={len(X_te):,})")
+        print(f"  Fold {fold}: Acc={acc:.3f}  Prec={p:.3f}  Rec={r:.3f}  "
+              f"F1={f:.3f}  (train={len(X_tr):,}  test={len(X_te):,})")
 
     if results:
         rdf = pd.DataFrame(results)
-        print(f"\n  Mean:   Prec={rdf['precision'].mean():.3f}  "
+        print(f"\n  Mean:   Acc={rdf['accuracy'].mean():.3f}  "
+              f"Prec={rdf['precision'].mean():.3f}  "
               f"Rec={rdf['recall'].mean():.3f}  "
-              f"F1={rdf['f1'].mean():.3f}  "
-              f"AUC={rdf['roc_auc'].mean():.3f}  "
-              f"PR-AUC={rdf['pr_auc'].mean():.3f}")
+              f"F1={rdf['f1'].mean():.3f}")
     return results
 
 
@@ -239,22 +218,33 @@ def train_models(df):
     features = discover_features(df)
     print(f"Feature count: {len(features)}")
 
+    # ── Validate target column ─────────────────────────────────────────
+    if "signal_class" not in df.columns:
+        print("[ERROR] Column 'signal_class' not found. "
+              "Re-run features.py to generate the multi-class target.")
+        return {}
+
+    # Drop rows with NaN signal_class
+    df = df.dropna(subset=["signal_class"]).copy()
+    df["signal_class"] = df["signal_class"].astype(int)
+
     train_df, test_df = purged_time_split(df, purge_days=10)
     X_train, y_train = clean_Xy(train_df, features)
     X_test, y_test   = clean_Xy(test_df, features)
     sample_weights   = compute_sample_weights(train_df)
 
-    class_ratio = max((y_train == 0).sum() / max((y_train == 1).sum(), 1), 1.0)
     print(f"Train: {len(X_train):,} rows  |  Test: {len(X_test):,} rows")
-    print(f"Class ratio (neg/pos): {class_ratio:.1f}")
-    print(f"Train signal rate: {y_train.mean():.3f}  |  "
-          f"Test signal rate: {y_test.mean():.3f}")
+    print(f"Class distribution (train):")
+    for cls_id, label in SIGNAL_LABELS.items():
+        count = (y_train == cls_id).sum()
+        pct = count / len(y_train) * 100
+        print(f"  {cls_id} ({label:12s}): {count:6,} ({pct:5.1f}%)")
 
     models = {}
 
     # ── XGBoost ────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("XGBoost (regularised + sample-weighted)")
+    print("XGBoost (multi-class, regularised + sample-weighted)")
     print("=" * 60)
     xgb = XGBClassifier(
         n_estimators=800,
@@ -266,8 +256,9 @@ def train_models(df):
         gamma=2,
         reg_alpha=0.5,
         reg_lambda=2.0,
-        scale_pos_weight=class_ratio,
-        eval_metric="aucpr",
+        objective="multi:softprob",
+        num_class=NUM_CLASSES,
+        eval_metric="mlogloss",
         early_stopping_rounds=50,
         random_state=42,
         verbosity=0,
@@ -279,14 +270,15 @@ def train_models(df):
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
-    xgb_proba = xgb.predict_proba(X_test)[:, 1]
-    _report("XGBoost", y_test, xgb_proba)
+    xgb_preds = xgb.predict(X_test)
+    xgb_proba = xgb.predict_proba(X_test)
+    _report("XGBoost", y_test, xgb_preds)
     models["xgb"] = xgb
 
     # ── LightGBM ───────────────────────────────────────────────────────
     if HAS_LGBM:
         print("\n" + "=" * 60)
-        print("LightGBM (regularised + sample-weighted)")
+        print("LightGBM (multi-class, regularised + sample-weighted)")
         print("=" * 60)
         lgbm = LGBMClassifier(
             n_estimators=800,
@@ -298,7 +290,8 @@ def train_models(df):
             min_child_samples=30,
             reg_alpha=0.5,
             reg_lambda=2.0,
-            scale_pos_weight=class_ratio,
+            objective="multiclass",
+            num_class=NUM_CLASSES,
             random_state=42,
             verbosity=-1,
         )
@@ -311,8 +304,9 @@ def train_models(df):
                 lgb.log_evaluation(0),
             ],
         )
-        lgbm_proba = lgbm.predict_proba(X_test)[:, 1]
-        _report("LightGBM", y_test, lgbm_proba)
+        lgbm_preds = lgbm.predict(X_test)
+        lgbm_proba = lgbm.predict_proba(X_test)
+        _report("LightGBM", y_test, lgbm_preds)
         models["lgbm"] = lgbm
 
         # ── Ensemble ───────────────────────────────────────────────────
@@ -320,7 +314,8 @@ def train_models(df):
         print("Ensemble (XGBoost + LightGBM average)")
         print("=" * 60)
         ens_proba = 0.5 * xgb_proba + 0.5 * lgbm_proba
-        _report("Ensemble", y_test, ens_proba)
+        ens_preds = ens_proba.argmax(axis=1)
+        _report("Ensemble", y_test, ens_preds)
 
     # ── Feature Importance ─────────────────────────────────────────────
     print("\n── Top 25 Features (XGBoost gain) " + "─" * 30)
@@ -337,12 +332,9 @@ def train_models(df):
 
     # ── Per-Symbol Breakdown (test set) ────────────────────────────────
     if "symbol" in test_df.columns:
-        print("\n── Per-Symbol Test Results (XGBoost, tuned threshold) " + "─" * 8)
-        thr = find_best_threshold(y_test, xgb_proba, min_precision=0.35)
-        xgb_preds = (xgb_proba >= thr).astype(int)
+        print("\n── Per-Symbol Test Results (XGBoost) " + "─" * 24)
         test_df = test_df.copy()
         test_df["pred"] = xgb_preds
-        test_df["proba"] = xgb_proba
         test_df["y"] = y_test.values
 
         rows = []
@@ -350,46 +342,50 @@ def train_models(df):
             if len(grp) < 10:
                 continue
             n = len(grp)
-            pos = grp["y"].sum()
-            pred_pos = grp["pred"].sum()
-            if pred_pos > 0 and pos > 0:
-                p = precision_score(grp["y"], grp["pred"], zero_division=0)
-                r = recall_score(grp["y"], grp["pred"], zero_division=0)
-                f = f1_score(grp["y"], grp["pred"], zero_division=0)
-            else:
-                p = r = f = 0.0
-            rows.append({"symbol": sym, "rows": n, "actual_pos": pos,
-                         "pred_pos": pred_pos, "prec": p, "rec": r, "f1": f})
+            acc = accuracy_score(grp["y"], grp["pred"])
+            f = f1_score(grp["y"], grp["pred"], average="macro", zero_division=0)
+            # Distribution of predictions
+            dist = {SIGNAL_LABELS[i]: (grp["pred"] == i).sum() for i in range(NUM_CLASSES)}
+            rows.append({"symbol": sym, "rows": n, "accuracy": acc, "macro_f1": f, **dist})
 
-        sdf = pd.DataFrame(rows).sort_values("f1", ascending=False)
+        sdf = pd.DataFrame(rows).sort_values("macro_f1", ascending=False)
         for _, row in sdf.head(15).iterrows():
+            dist_str = "  ".join(f"{SIGNAL_LABELS[i][:2]}={int(row.get(SIGNAL_LABELS[i], 0)):3d}"
+                                 for i in range(NUM_CLASSES))
             print(f"  {row['symbol']:<16s}  rows={row['rows']:4d}  "
-                  f"pos={row['actual_pos']:3.0f}  pred={row['pred_pos']:3.0f}  "
-                  f"P={row['prec']:.2f}  R={row['rec']:.2f}  F1={row['f1']:.2f}")
+                  f"Acc={row['accuracy']:.2f}  F1={row['macro_f1']:.2f}  "
+                  f"[{dist_str}]")
 
     return models
 
 
-def _report(name, y_true, y_proba):
-    """Print classification metrics at default and tuned thresholds."""
-    auc = roc_auc_score(y_true, y_proba) if y_true.nunique() > 1 else 0
-    ap  = average_precision_score(y_true, y_proba) if y_true.nunique() > 1 else 0
+def _report(name, y_true, y_pred):
+    """Print multi-class classification metrics."""
+    target_names = [SIGNAL_LABELS[i] for i in range(NUM_CLASSES)]
 
-    # Default threshold
-    preds_default = (y_proba >= 0.5).astype(int)
-    print(f"\n  [{name}] @ threshold=0.50:")
-    print(classification_report(y_true, preds_default, digits=3, zero_division=0))
-    print(f"  ROC-AUC: {auc:.3f}  |  PR-AUC: {ap:.3f}")
+    acc = accuracy_score(y_true, y_pred)
+    p_macro = precision_score(y_true, y_pred, average="macro", zero_division=0)
+    r_macro = recall_score(y_true, y_pred, average="macro", zero_division=0)
+    f_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    f_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
-    # Tuned threshold targeting precision ≥ 0.35 while maximising F1
-    thr = find_best_threshold(y_true, y_proba, min_precision=0.35)
-    preds_tuned = (y_proba >= thr).astype(int)
-    p = precision_score(y_true, preds_tuned, zero_division=0)
-    r = recall_score(y_true, preds_tuned, zero_division=0)
-    f = f1_score(y_true, preds_tuned, zero_division=0)
-    print(f"\n  [{name}] @ tuned threshold={thr:.3f}  (target prec≥0.35):")
-    print(classification_report(y_true, preds_tuned, digits=3, zero_division=0))
-    print(f"  Precision: {p:.3f}  |  Recall: {r:.3f}  |  F1: {f:.3f}")
+    print(f"\n  [{name}] Multi-class results:")
+    print(classification_report(
+        y_true, y_pred, target_names=target_names,
+        digits=3, zero_division=0,
+    ))
+    print(f"  Accuracy:     {acc:.3f}")
+    print(f"  Macro    P={p_macro:.3f}  R={r_macro:.3f}  F1={f_macro:.3f}")
+    print(f"  Weighted F1:  {f_weighted:.3f}")
+
+    # ── Confusion Matrix ───────────────────────────────────────────────
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(NUM_CLASSES)))
+    print(f"\n  Confusion Matrix:")
+    header = "            " + "  ".join(f"{SIGNAL_LABELS[i][:6]:>6s}" for i in range(NUM_CLASSES))
+    print(f"  {header}")
+    for i in range(NUM_CLASSES):
+        row = "  ".join(f"{cm[i, j]:6d}" for j in range(NUM_CLASSES))
+        print(f"  {SIGNAL_LABELS[i]:<12s}{row}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────
