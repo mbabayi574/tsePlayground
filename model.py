@@ -19,6 +19,7 @@ Key features:
   8. Feature importance and per-symbol analysis.
 """
 
+import json
 import pandas as pd
 import numpy as np
 import os
@@ -82,6 +83,33 @@ def discover_features(df):
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     features = [c for c in numeric_cols if c not in NON_FEATURE_COLS]
     return features
+
+
+def load_selected_features(df):
+    """
+    Load curated feature list from feature_selection.py output.
+    Falls back to discover_features() if the file doesn't exist or
+    contains features not present in the dataframe.
+    """
+    path = "data/selected_features.json"
+    if os.path.exists(path):
+        with open(path) as f:
+            selected = json.load(f)
+        # Validate: only keep features that actually exist in df
+        available = set(df.select_dtypes(include=[np.number]).columns)
+        valid = [f for f in selected if f in available]
+        if len(valid) >= 10:
+            print(f"Using curated feature set: {len(valid)} features "
+                  f"(from {path})")
+            if len(valid) < len(selected):
+                missing = set(selected) - set(valid)
+                print(f"  [WARN] {len(missing)} features not found in data: "
+                      f"{sorted(missing)[:5]}...")
+            return valid
+        else:
+            print(f"[WARN] Curated feature set too small ({len(valid)}), "
+                  f"falling back to auto-discovery.")
+    return discover_features(df)
 
 
 # ── Purged Time-Aware Split ────────────────────────────────────────────
@@ -215,7 +243,7 @@ def walk_forward_cv(df, features, n_splits=4, purge_days=10):
 # ── Training Pipeline ──────────────────────────────────────────────────
 
 def train_models(df):
-    features = discover_features(df)
+    features = load_selected_features(df)
     print(f"Feature count: {len(features)}")
 
     # ── Validate target column ─────────────────────────────────────────

@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import streamlit as st
@@ -59,6 +60,22 @@ def discover_features(df):
     return [c for c in numeric_cols if c not in NON_FEATURE_COLS]
 
 
+def load_selected_features(df):
+    """
+    Load curated feature list from feature_selection.py output.
+    Falls back to discover_features() if the file doesn't exist.
+    """
+    path = os.path.join(BASE_DIR, "data", "selected_features.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            selected = json.load(f)
+        available = set(df.select_dtypes(include=[np.number]).columns)
+        valid = [f for f in selected if f in available]
+        if len(valid) >= 10:
+            return valid, "curated"
+    return discover_features(df), "auto"
+
+
 @st.cache_data
 def load_data():
     dfs = []
@@ -76,7 +93,7 @@ def load_data():
 @st.cache_resource
 def train_model(df):
     """Train a 5-class XGBoost model on pooled data."""
-    features = discover_features(df)
+    features, feature_mode = load_selected_features(df)
     X = df[features].replace([np.inf, -np.inf], np.nan).fillna(0)
     y = df["signal_class"].astype(int)
     X_train, X_test, y_train, y_test = train_test_split(
@@ -98,7 +115,7 @@ def train_model(df):
         tree_method="hist",
     )
     model.fit(X_train, y_train)
-    return model, features
+    return model, features, feature_mode
 
 
 # ── Page config ────────────────────────────────────────────────────────
@@ -128,7 +145,16 @@ if "signal_class" not in df.columns:
 df = df.dropna(subset=["signal_class"]).copy()
 df["signal_class"] = df["signal_class"].astype(int)
 
-model, features = train_model(df)
+model, features, feature_mode = train_model(df)
+
+# Show feature mode in sidebar
+with st.sidebar:
+    st.markdown("### :material/tune: Model info")
+    mode_label = "Curated (SHAP+MI+RFE)" if feature_mode == "curated" else "Auto-discovery"
+    st.metric("Feature mode", mode_label)
+    st.metric("Feature count", len(features))
+    with st.expander("Feature list"):
+        st.write(features)
 
 # ── Latest Signals ─────────────────────────────────────────────────────
 st.subheader(":material/notifications_active: Latest signals")
