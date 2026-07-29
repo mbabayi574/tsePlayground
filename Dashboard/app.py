@@ -164,6 +164,7 @@ def load_macro_summary():
         ("TSE_Index", "TSE Index", "Pts"),
         ("Gold_USD", "Gold / USD", "$"),
         ("Silver_USD", "Silver / USD", "$"),
+        ("Copper_USD", "Copper / USD", "$"),
         ("Oil_USD", "Oil / USD", "$"),
         ("BTC_USD", "BTC / USD", "$"),
     ]

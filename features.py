@@ -32,8 +32,9 @@ def load_macro_data():
 
 def add_macro_features(df, macro_data=None):
     """
-    Merge macro indicators (USD/IRR, Gold/USD, Silver/USD, Oil/USD, TSE Index, BTC/USD)
-    and add scale-invariant features (returns, ratios, volatility, excess returns).
+    Merge macro indicators (USD/IRR, Gold/USD, Silver/USD, Copper/USD, Oil/USD,
+    TSE Index, BTC/USD) and add scale-invariant features (returns, ratios,
+    volatility, excess returns).
     """
     if not macro_data:
         macro_data = load_macro_data()
@@ -219,7 +220,7 @@ def add_features(df, macro_data=None):
             for lag in [1, 2, 3, 5]:
                 df[f"{col}_lag{lag}"] = df[col].shift(lag)
 
-    # ── Add Macro Features (USD/IRR, Gold/USD, Silver/USD, Oil/USD, TSE Index, BTC/USD) ──
+    # ── Add Macro Features (USD/IRR, Gold/USD, Silver/USD, Copper/USD, Oil/USD, TSE Index, BTC/USD) ──
     df = add_macro_features(df, macro_data=macro_data)
 
     return df
