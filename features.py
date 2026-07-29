@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import ta
 import os
-from symbols import SYMBOL_NAMES
+from symbols import SYMBOL_NAMES, MACRO_SYMBOLS
 
 
 def load_stock(eng_name):
@@ -15,7 +15,78 @@ def load_stock(eng_name):
     return df
 
 
-def add_features(df):
+def load_macro_data():
+    """Load macro indicator CSVs from data/raw/macro/."""
+    macro_data = {}
+    for name in MACRO_SYMBOLS.keys():
+        path = f"data/raw/macro/{name}.csv"
+        if os.path.exists(path):
+            m_df = pd.read_csv(path)
+            m_df["date"] = pd.to_datetime(m_df["date"])
+            m_df = m_df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+            macro_data[name] = m_df
+        else:
+            print(f"[WARN] Macro raw file missing: {path}")
+    return macro_data
+
+
+def add_macro_features(df, macro_data=None):
+    """
+    Merge macro indicators (USD/IRR, Gold/USD, Silver/USD, Oil/USD, TSE Index, BTC/USD)
+    and add scale-invariant features (returns, ratios, volatility, excess returns).
+    """
+    if not macro_data:
+        macro_data = load_macro_data()
+
+    if "date" not in df.columns:
+        return df
+
+    stock_df = df.copy()
+    stock_df["date"] = pd.to_datetime(stock_df["date"])
+    stock_df = stock_df.sort_values("date").reset_index(drop=True)
+
+    for name, m_df in macro_data.items():
+        if m_df.empty:
+            continue
+        key_name = name.lower()
+        sub_m = m_df[["date", "close"]].rename(columns={"close": f"{key_name}_close"})
+
+        # Backward merge_asof ensures no lookahead leakage on missing TSE trading calendar days
+        stock_df = pd.merge_asof(stock_df, sub_m, on="date", direction="backward")
+        stock_df[f"{key_name}_close"] = stock_df[f"{key_name}_close"].ffill().bfill()
+
+        series = stock_df[f"{key_name}_close"]
+
+        # ── Macro Returns ──
+        for d in [1, 5, 20]:
+            stock_df[f"{key_name}_ret_{d}d"] = series.pct_change(d)
+
+        # ── Macro Moving Average Ratios ──
+        sma20 = series.rolling(20, min_periods=5).mean()
+        sma50 = series.rolling(50, min_periods=10).mean()
+        stock_df[f"{key_name}_to_sma20"] = series / sma20
+        stock_df[f"{key_name}_to_sma50"] = series / sma50
+
+        # ── Macro Volatility ──
+        stock_df[f"{key_name}_vol_20"] = series.pct_change().rolling(20, min_periods=5).std()
+
+    # ── Relative Benchmark Performance ──
+    if "tse_index_ret_5d" in stock_df.columns and "ret_5d" in stock_df.columns:
+        stock_df["stock_vs_tse_index_ret_5d"] = stock_df["ret_5d"] - stock_df["tse_index_ret_5d"]
+    if "tse_index_ret_20d" in stock_df.columns and "ret_20d" in stock_df.columns:
+        stock_df["stock_vs_tse_index_ret_20d"] = stock_df["ret_20d"] - stock_df["tse_index_ret_20d"]
+
+    if "usd_irr_ret_5d" in stock_df.columns and "ret_5d" in stock_df.columns:
+        stock_df["stock_vs_usd_ret_5d"] = stock_df["ret_5d"] - stock_df["usd_irr_ret_5d"]
+    if "usd_irr_ret_20d" in stock_df.columns and "ret_20d" in stock_df.columns:
+        stock_df["stock_vs_usd_ret_20d"] = stock_df["ret_20d"] - stock_df["usd_irr_ret_20d"]
+
+    # Convert date back to string format
+    stock_df["date"] = stock_df["date"].dt.strftime("%Y-%m-%d")
+    return stock_df
+
+
+def add_features(df, macro_data=None):
     """
     Build a rich, scale-invariant feature set suitable for pooled
     multi-stock classification.  Every feature is either a ratio,
@@ -148,6 +219,9 @@ def add_features(df):
             for lag in [1, 2, 3, 5]:
                 df[f"{col}_lag{lag}"] = df[col].shift(lag)
 
+    # ── Add Macro Features (USD/IRR, Gold/USD, Silver/USD, Oil/USD, TSE Index, BTC/USD) ──
+    df = add_macro_features(df, macro_data=macro_data)
+
     return df
 
 
@@ -190,13 +264,14 @@ def create_target(df, days=5, threshold=0.05):
 
 def process_all():
     os.makedirs("data/processed", exist_ok=True)
+    macro_data = load_macro_data()
 
     for eng_name in SYMBOL_NAMES:
         print(f"Processing {eng_name}...")
         df = load_stock(eng_name)
         if df is None:
             continue
-        df = add_features(df)
+        df = add_features(df, macro_data=macro_data)
         df = create_target(df)
         df.dropna(inplace=True)
 

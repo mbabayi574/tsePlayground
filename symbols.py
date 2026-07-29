@@ -76,3 +76,13 @@ SYMBOLS = {
 }
 
 SYMBOL_NAMES = list(SYMBOLS.keys())
+
+MACRO_SYMBOLS = {
+    "USD_IRR": {"source": "yfinance", "ticker": "USDIRR=X", "name": "USD/IRR"},
+    "Gold_USD": {"source": "yfinance", "ticker": "GC=F", "name": "Gold/USD"},
+    "Silver_USD": {"source": "yfinance", "ticker": "SI=F", "name": "Silver/USD"},
+    "Oil_USD": {"source": "yfinance", "ticker": "CL=F", "name": "Oil/USD"},
+    "TSE_Index": {"source": "pytse_client", "ticker": "شاخص كل", "name": "Tehran Stock Exchange Index"},
+    "BTC_USD": {"source": "yfinance", "ticker": "BTC-USD", "name": "BTC/USD"},
+}
+

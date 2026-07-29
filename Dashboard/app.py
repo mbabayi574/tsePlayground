@@ -156,8 +156,57 @@ with st.sidebar:
     with st.expander("Feature list"):
         st.write(features)
 
+
+@st.cache_data
+def load_macro_summary():
+    macro_info = [
+        ("USD_IRR", "USD / IRR", "Rial"),
+        ("TSE_Index", "TSE Index", "Pts"),
+        ("Gold_USD", "Gold / USD", "$"),
+        ("Silver_USD", "Silver / USD", "$"),
+        ("Oil_USD", "Oil / USD", "$"),
+        ("BTC_USD", "BTC / USD", "$"),
+    ]
+    summary = []
+    for key, label, unit in macro_info:
+        path = os.path.join(BASE_DIR, "data", "raw", "macro", f"{key}.csv")
+        if os.path.exists(path):
+            mdf = pd.read_csv(path)
+            if len(mdf) >= 2:
+                last_val = mdf["close"].iloc[-1]
+                prev_val = mdf["close"].iloc[-2]
+                chg_pct = (last_val - prev_val) / prev_val * 100
+                spark = mdf["close"].tail(20).tolist()
+                summary.append({
+                    "Key": key,
+                    "Label": label,
+                    "Value": last_val,
+                    "Change %": chg_pct,
+                    "Unit": unit,
+                    "Spark": spark,
+                })
+    return summary
+
+
+# ── Macro Market Context ───────────────────────────────────────────────
+st.subheader(":material/globe: Macro market indicators")
+macro_summary = load_macro_summary()
+if macro_summary:
+    with st.container(horizontal=True):
+        for item in macro_summary:
+            fmt_val = f"{item['Value']:,.0f}" if item['Value'] > 100 else f"{item['Value']:,.2f}"
+            st.metric(
+                label=item["Label"],
+                value=f"{fmt_val} {item['Unit']}",
+                delta=f"{item['Change %']:+.2f}%",
+                border=True,
+                chart_data=item["Spark"],
+                chart_type="line",
+            )
+
 # ── Latest Signals ─────────────────────────────────────────────────────
 st.subheader(":material/notifications_active: Latest signals")
+
 
 latest = []
 for symbol in SYMBOLS:
