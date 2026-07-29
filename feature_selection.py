@@ -350,5 +350,55 @@ def run_feature_selection():
     return selected, report
 
 
+# ── Lookback Lag Optimization via Random Forest (Guideline B) ─────────────
+
+from sklearn.ensemble import RandomForestRegressor
+
+def optimize_lookback_lags_rf(series, max_lags: int = 30, min_lags: int = 5):
+    """
+    Optimizes lookback lag length for time-series / residual sequences using a Random Forest regressor.
+    
+    Treats past lag steps (t-1, t-2, ..., t-max_lags) as candidate features to predict target at t.
+    Analyzes resulting feature importances to establish statistically optimal sequence length.
+    
+    Args:
+        series (pd.Series or np.ndarray): Input time series (e.g., prices or ARIMA residuals).
+        max_lags (int): Maximum candidate lookback window to evaluate.
+        min_lags (int): Minimum enforced lookback sequence length.
+        
+    Returns:
+        tuple: (optimal_lag_length, pd.Series of lag importances)
+    """
+    series_arr = np.array(series).flatten()
+    if len(series_arr) <= max_lags + 10:
+        return max(min_lags, len(series_arr) // 4), pd.Series()
+
+    # Build lag candidate feature matrix X and target y
+    X_lags, y_target = [], []
+    for t in range(max_lags, len(series_arr)):
+        X_lags.append(series_arr[t - max_lags : t][::-1])  # lag_1, lag_2, ..., lag_max_lags
+        y_target.append(series_arr[t])
+
+    X_lags = np.array(X_lags)
+    y_target = np.array(y_target)
+
+    # Train Random Forest Regressor
+    rf = RandomForestRegressor(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1)
+    rf.fit(X_lags, y_target)
+
+    importances = rf.feature_importances_
+    lag_names = [f"lag_{i}" for i in range(1, max_lags + 1)]
+    imp_series = pd.Series(importances, index=lag_names)
+
+    # Determine cutoff: Find smallest lag step window covering >= 85% of cumulative importance
+    cum_imp = np.cumsum(importances)
+    cutoff_idx = np.searchsorted(cum_imp, 0.85 * cum_imp[-1]) + 1
+    optimal_lags = int(np.clip(cutoff_idx, min_lags, max_lags))
+
+    print(f"[RF Lag Optimization] Selected optimal lookback sequence length = {optimal_lags} (from max {max_lags})")
+    return optimal_lags, imp_series
+
+
 if __name__ == "__main__":
     run_feature_selection()
+

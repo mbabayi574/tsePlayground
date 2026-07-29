@@ -223,6 +223,59 @@ def add_features(df, macro_data=None):
     # ── Add Macro Features (USD/IRR, Gold/USD, Silver/USD, Copper/USD, Oil/USD, TSE Index, BTC/USD) ──
     df = add_macro_features(df, macro_data=macro_data)
 
+    # ── Time-series cleaning (forward/backward fill & IQR outlier capping) ──
+    df = clean_features(df)
+
+    return df
+
+
+def clean_features(df, iqr_threshold: float = 3.0):
+    """
+    Cleans time-series inputs by forward/backward filling missing values
+    and capping extreme outliers using Interquartile Range (IQR) bounds.
+    """
+    df = df.copy()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    exclude = {"date", "timestamp", "future_return", "signal", "signal_class"}
+    cols_to_clean = [c for c in numeric_cols if c not in exclude]
+
+    for col in cols_to_clean:
+        df[col] = df[col].ffill().bfill()
+        q25, q75 = df[col].quantile(0.25), df[col].quantile(0.75)
+        iqr = q75 - q25
+        if iqr > 0:
+            lower = q25 - iqr_threshold * iqr
+            upper = q75 + iqr_threshold * iqr
+            df[col] = df[col].clip(lower, upper)
+    return df
+
+
+def add_arima_features(df, arima_order=(3, 0, 3)):
+    """
+    Feature-Augmentation (Non-Additive) Hybrid Architecture:
+    Fits an ARIMA model to historical close prices and generates in-sample point forecasts
+    and residuals, appending them as explicit features ('arima_forecast', 'arima_residual')
+    to feed multivariate predictors alongside technical indicators.
+    """
+    try:
+        from statsmodels.tsa.arima.model import ARIMA
+        df = df.copy()
+        price_col = "close" if "close" in df.columns else df.select_dtypes(include=[np.number]).columns[0]
+        prices = df[price_col].values
+
+        if len(prices) > 30:
+            arima_fit = ARIMA(prices, order=arima_order).fit()
+            in_sample_preds = arima_fit.fittedvalues
+            residuals = prices - in_sample_preds
+            df["arima_forecast"] = in_sample_preds
+            df["arima_residual"] = residuals
+        else:
+            df["arima_forecast"] = df[price_col]
+            df["arima_residual"] = 0.0
+    except Exception as e:
+        print(f"[WARN] ARIMA feature extraction failed: {e}")
+        df["arima_forecast"] = df["close"] if "close" in df.columns else 0.0
+        df["arima_residual"] = 0.0
     return df
 
 

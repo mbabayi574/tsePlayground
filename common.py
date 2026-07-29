@@ -93,3 +93,114 @@ def preprocess_tsetmc_data(df: pd.DataFrame, lookback: int = lookback, pred_len:
 
     return x_df, x_timestamp, pd.Series(y_timestamp)
 
+
+# ── Standardized Evaluation Metrics ───────────────────────────────────
+
+import numpy as np
+
+def compute_mae(y_true, y_pred):
+    """Mean Absolute Error (MAE)."""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    return float(np.mean(np.abs(y_true - y_pred)))
+
+def compute_rmse(y_true, y_pred):
+    """Root Mean Squared Error (RMSE)."""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+def compute_mape(y_true, y_pred, epsilon=1e-8):
+    """Mean Absolute Percentage Error (MAPE) in %."""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    denom = np.where(np.abs(y_true) < epsilon, epsilon, y_true)
+    return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+def evaluate_forecast_metrics(y_true, y_pred):
+    """
+    Computes standardized time-series forecast evaluation metrics:
+    MAE, RMSE, and MAPE.
+    """
+    return {
+        "MAE": compute_mae(y_true, y_pred),
+        "RMSE": compute_rmse(y_true, y_pred),
+        "MAPE": compute_mape(y_true, y_pred),
+    }
+
+
+# ── Time-Series Cleaning & Preprocessing Helpers ──────────────────────
+
+def clean_timeseries_data(data, iqr_threshold: float = 3.0):
+    """
+    Cleans time-series inputs:
+    1. Forward-fill and backward-fill missing values.
+    2. Winsorize extreme outliers using Interquartile Range (IQR) bounds.
+    
+    Accepts pd.Series, pd.DataFrame, or np.ndarray.
+    """
+    if isinstance(data, np.ndarray):
+        s = pd.Series(data)
+    else:
+        s = data.copy()
+        
+    if isinstance(s, pd.DataFrame):
+        # Apply to numeric columns
+        for col in s.select_dtypes(include=[np.number]).columns:
+            s[col] = s[col].ffill().bfill()
+            q25, q75 = s[col].quantile(0.25), s[col].quantile(0.75)
+            iqr = q75 - q25
+            if iqr > 0:
+                lower = q25 - iqr_threshold * iqr
+                upper = q75 + iqr_threshold * iqr
+                s[col] = s[col].clip(lower, upper)
+        return s
+    else:
+        s = pd.Series(s).ffill().bfill()
+        q25, q75 = s.quantile(0.25), s.quantile(0.75)
+        iqr = q75 - q25
+        if iqr > 0:
+            lower = q25 - iqr_threshold * iqr
+            upper = q75 + iqr_threshold * iqr
+            s = s.clip(lower, upper)
+        return s.values if isinstance(data, np.ndarray) else s
+
+
+# ── Chronological Helper Splits ────────────────────────────────────────
+
+def chronological_split(data, test_ratio: float = 0.20, purge_days: int = 0):
+    """
+    Chronologically splits a time series or dataframe into train and test sets
+    with an optional purge gap to prevent temporal target leakage.
+    """
+    n = len(data)
+    split_idx = int(n * (1 - test_ratio))
+    train_end = max(0, split_idx - purge_days)
+    test_start = split_idx
+    
+    if isinstance(data, (pd.DataFrame, pd.Series)):
+        train = data.iloc[:train_end].copy()
+        test = data.iloc[test_start:].copy()
+    else:
+        train = data[:train_end]
+        test = data[test_start:]
+        
+    return train, test
+
+def generate_walk_forward_splits(data, n_splits: int = 4, min_train_size: int = 100, test_size: int = 20):
+    """
+    Generates expanding-window walk-forward validation splits (train, test indices)
+    for leakage-free time-series evaluation.
+    """
+    n = len(data)
+    splits = []
+    step = (n - min_train_size - test_size) // n_splits if n_splits > 1 else (n - min_train_size - test_size)
+    step = max(1, step)
+    
+    for i in range(n_splits):
+        train_end = min_train_size + i * step
+        test_end = min(train_end + test_size, n)
+        if train_end >= n or train_end >= test_end:
+            break
+        splits.append((list(range(0, train_end)), list(range(train_end, test_end))))
+        
+    return splits
+
+

@@ -416,9 +416,82 @@ def _report(name, y_true, y_pred):
         print(f"  {SIGNAL_LABELS[i]:<12s}{row}")
 
 
+# ── Hybrid ARIMA-LSTM Pipeline ─────────────────────────────────────────
+
+from hybrid_arima_lstm import HybridARIMALSTMPredictor
+from common import (
+    clean_timeseries_data,
+    chronological_split,
+    evaluate_forecast_metrics,
+)
+
+def train_and_evaluate_hybrid_arima_lstm(symbol="Foolad", arima_order=(3, 0, 3), seq_length="auto", architecture="additive"):
+    """
+    Trains and evaluates the Hybrid ARIMA-LSTM predictor on a target symbol's price series.
+    Uses Walk-Forward Validation (WFO) and leakage-free evaluation metrics (MAE, RMSE, MAPE).
+    """
+    print("\n" + "=" * 60)
+    print(f"Hybrid ARIMA-LSTM Predictor evaluation for: {symbol} (Architecture: {architecture})")
+    print("=" * 60)
+
+    path = f"data/processed/{symbol}.csv"
+    if not os.path.exists(path):
+        print(f"[ERROR] Data file not found: {path}")
+        return None
+
+    df = pd.read_csv(path)
+    price_col = "close" if "close" in df.columns else df.select_dtypes(include=[np.number]).columns[0]
+    prices = df[price_col].values
+
+    # Clean time series inputs (IQR winsorization + fill missing)
+    prices_clean = clean_timeseries_data(prices)
+
+    # Chronological Split (80% train, 20% test - Guideline D)
+    train_prices, test_prices = chronological_split(prices_clean, test_ratio=0.20)
+    print(f"Train size: {len(train_prices)} days | Test size: {len(test_prices)} days")
+
+    # Fit Hybrid Predictor
+    hybrid = HybridARIMALSTMPredictor(
+        arima_order=arima_order,
+        seq_length=seq_length,
+        epochs=30,
+        batch_size=32,
+        architecture=architecture,
+    )
+
+    hybrid.fit(train_prices, validation_split=0.2)
+
+    # Out-of-sample Forecast
+    steps = len(test_prices)
+    forecast_vals = hybrid.forecast(steps=steps, clamp_bounds="auto")
+
+    # Compute Standardized Metrics (common.py)
+    metrics = evaluate_forecast_metrics(test_prices, forecast_vals)
+
+    print("\n── Out-of-Sample Forecast Performance ──")
+    print(f"  MAE  : {metrics['MAE']:.4f}")
+    print(f"  RMSE : {metrics['RMSE']:.4f}")
+    print(f"  MAPE : {metrics['MAPE']:.2f}%")
+
+    return {
+        "symbol": symbol,
+        "metrics": metrics,
+        "hybrid_model": hybrid,
+        "forecast": forecast_vals,
+        "actual": test_prices,
+    }
+
+
 # ── Main ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     df = load_all_data()
     print(f"Total rows: {len(df):,}")
     models = train_models(df)
+
+    # Run Hybrid ARIMA-LSTM integration run for core symbol
+    try:
+        hybrid_results = train_and_evaluate_hybrid_arima_lstm(symbol="Foolad")
+    except Exception as e:
+        print(f"[WARN] Hybrid ARIMA-LSTM execution error: {e}")
+

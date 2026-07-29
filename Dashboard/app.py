@@ -310,3 +310,53 @@ if os.path.exists(selected_path):
             st.markdown("**RSI (14)**")
             rsi_data = pd.DataFrame({"Day": range(len(sdf)), "RSI": sdf[rsi_col].values})
             st.line_chart(rsi_data, x="Day", y="RSI")
+
+    # ── Hybrid ARIMA-LSTM Forecast ─────────────────────────────────────
+    st.subheader(":material/auto_graph: Hybrid ARIMA-LSTM forecast")
+
+    @st.cache_resource
+    def run_hybrid_forecast(stock_name):
+        from hybrid_arima_lstm import HybridARIMALSTMPredictor
+        from common import clean_timeseries_data, evaluate_forecast_metrics
+
+        path = os.path.join(BASE_DIR, "data", "processed", f"{stock_name}.csv")
+        if not os.path.exists(path):
+            return None
+        stock_df = pd.read_csv(path)
+        p_col = "close" if "close" in stock_df.columns else stock_df.select_dtypes(include=[np.number]).columns[0]
+        p_vals = clean_timeseries_data(stock_df[p_col].values)
+
+        train_p = p_vals[:-5]
+        actual_5d = p_vals[-5:]
+
+        predictor = HybridARIMALSTMPredictor(arima_order=(3, 0, 3), seq_length="auto", epochs=60, architecture="additive")
+        predictor.fit(train_p, validation_split=0.2)
+        fc_5d = predictor.forecast(steps=5, clamp_bounds="auto")
+        metrics_dict = evaluate_forecast_metrics(actual_5d, fc_5d)
+        return {
+            "forecast": fc_5d,
+            "actual": actual_5d,
+            "metrics": metrics_dict,
+            "ljung_p": predictor.ljung_box_pvalue,
+            "seq_len": predictor.effective_seq_length,
+        }
+
+    try:
+        h_res = run_hybrid_forecast(selected)
+        if h_res:
+            with st.container(border=True):
+                st.markdown(f"**5-day out-of-sample Hybrid ARIMA-LSTM prediction ({selected})**")
+                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                m_col1.metric("MAE", f"{h_res['metrics']['MAE']:.2f}")
+                m_col2.metric("RMSE", f"{h_res['metrics']['RMSE']:.2f}")
+                m_col3.metric("MAPE", f"{h_res['metrics']['MAPE']:.2f}%")
+                m_col4.metric("Optimal lookback lag", f"{h_res['seq_len']} days")
+
+                chart_df = pd.DataFrame({
+                    "Step": [f"Day +{i+1}" for i in range(5)],
+                    "Actual Close": h_res["actual"],
+                    "Hybrid Forecast": h_res["forecast"],
+                })
+                st.line_chart(chart_df, x="Step", y=["Actual Close", "Hybrid Forecast"])
+    except Exception as err:
+        st.info(f"Hybrid forecast initializing for {selected}: {err}")
